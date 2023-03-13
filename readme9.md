@@ -107,4 +107,146 @@
         2023-03-10 13:34:55.067 UTC [1727] СООБЩЕНИЕ:  контрольная точка завершена: записано буферов: 1752 (1.3%); добавлено файлов WAL 0, удалено: 0, переработано: 1; запись=14.861 сек., синхр.=0.016 сек., всего=14.916 сек.; синхронизировано_файлов=21, самая_долгая_синхр.=0.007 сек., средняя=0.001 сек.; расстояние=17083 kB, ожидалось=18860 kB
 ```
 
-- все точки выполнились по расписанию, длительность выполнения ни разу не превысила 30 секунд (время расписания выполнения точек) 
+- все точки выполнились по расписанию, длительность выполнения ни разу не превысила 30 секунд (время расписания выполнения точек)
+
+
+### Сравнение tps в синхронном/асинхронном режиме утилитой pgbench
+
+
+- проверил tps в режиме синхронной фиксации транзакций:  
+
+    ```
+        pgbench (14.7 (Ubuntu 14.7-1.pgdg20.04+1))
+        starting vacuum...end.
+        progress: 60.0 s, 272.4 tps, lat 29.335 ms stddev 9.849
+        progress: 120.0 s, 272.6 tps, lat 29.345 ms stddev 8.439
+        progress: 180.0 s, 262.6 tps, lat 30.468 ms stddev 9.644
+        progress: 240.0 s, 253.3 tps, lat 31.580 ms stddev 10.018
+        progress: 300.0 s, 262.0 tps, lat 30.539 ms stddev 8.971
+        progress: 360.0 s, 274.0 tps, lat 29.195 ms stddev 8.599
+        progress: 420.0 s, 266.2 tps, lat 30.055 ms stddev 9.881
+        progress: 480.0 s, 270.5 tps, lat 29.569 ms stddev 10.250
+        progress: 540.0 s, 253.7 tps, lat 31.537 ms stddev 9.458
+        progress: 600.0 s, 259.6 tps, lat 30.818 ms stddev 11.975
+        transaction type: <builtin: TPC-B (sort of)>
+        scaling factor: 1
+        query mode: simple
+        number of clients: 8
+        number of threads: 1
+        duration: 600 s
+        number of transactions actually processed: 158822
+        latency average = 30.221 ms
+        latency stddev = 9.781 ms
+        initial connection time = 39.423 ms
+        tps = 264.703344 (without initial connection time)
+
+    ```
+
+- для замера tps в режиме **асинхронной** фиксации транзакций изменил параметр `synchronous_commit = off`
+    `ALTER SYSTEM SET synchronous_commit = off;`
+- запустил проверку в режиме асинхронной фиксации транзакций: 
+
+    `pgbench -c 8 -P 60 -T 600 -U postgres postgres`
+
+    ```
+    pgbench (14.7 (Ubuntu 14.7-1.pgdg20.04+1))
+    starting vacuum...end.
+    progress: 60.0 s, 2467.8 tps, lat 3.239 ms stddev 1.195
+    progress: 120.0 s, 2372.5 tps, lat 3.372 ms stddev 1.007
+    progress: 180.0 s, 2362.2 tps, lat 3.386 ms stddev 0.978
+    progress: 240.0 s, 2349.9 tps, lat 3.404 ms stddev 1.055
+    progress: 300.0 s, 2368.0 tps, lat 3.378 ms stddev 1.024
+    progress: 360.0 s, 2366.2 tps, lat 3.381 ms stddev 0.997
+    progress: 420.0 s, 2352.4 tps, lat 3.401 ms stddev 0.972
+    progress: 480.0 s, 2382.9 tps, lat 3.357 ms stddev 0.973
+    progress: 540.0 s, 2391.9 tps, lat 3.344 ms stddev 0.945
+    progress: 600.0 s, 2382.1 tps, lat 3.358 ms stddev 0.998
+    transaction type: <builtin: TPC-B (sort of)>
+    scaling factor: 1
+    query mode: simple
+    number of clients: 8
+    number of threads: 1
+    duration: 600 s
+    number of transactions actually processed: 1427761
+    latency average = 3.361 ms
+    latency stddev = 1.018 ms
+    initial connection time = 40.324 ms
+    tps = 2379.715092 (without initial connection time)
+    ``` 
+
+- В режиме асинхронного подтверждения сервер сообщает об успешном завершении сразу, как только транзакция будет завершена логически, прежде чем сгенерированные записи WAL фактически будут записаны на диск..
+- Видим 9 кратный прирост
+
+- создаем кластер с включенным контролем
+`sudo pg_createcluster 14 checks -- --data-checksum`
+
+- список  
+`pg_lsclusters`
+```
+Ver Cluster Port Status Owner    Data directory                Log file
+14  checks  5433 online postgres /var/lib/postgresql/14/checks /var/log/postgresql/postgresql-14-checks.log
+14  main    5432 online postgres /var/lib/postgresql/14/main   /var/log/postgresql/postgresql-14-main.log
+```
+- подключение
+`sudo -u postgres psql -p 5433`
+
+- создал базу и вошел в неё
+```
+    postgres=# create database checkbase;
+    postgres=# \c checkbase
+```
+
+- создал таблицу
+```
+checkbase=# create table simletable(id int, datavalue varchar(10));
+CREATE TABLE
+```
+- внес данные
+```
+checkbase=# insert into simletable (id,datavalue) values(300,'три сотни'),(4,'четыре');
+INSERT 0 2
+```
+- посмотрел расположение файла таблицы
+```
+checkbase=# select pg_relation_filepath('simletable');
+ pg_relation_filepath
+----------------------
+ base/16384/16388
+(1 строка)
+```
+- во второй  сессии терминала остановил принудительно сервер 
+ `sudo pkill -9 postgres`
+- изменил данные в файле таблицы (сотрем из заголовка LSN последней журнальной записи)
+`$ sudo dd if=/dev/zero of=/var/lib/postgresql/14/checks/base/16384/16388 oflag=dsync conv=notrunc bs=1 count=8`
+
+- в первой сессии выполняю
+```
+checkbase=# select * from simletable;
+ПРЕДУПРЕЖДЕНИЕ:  ошибка проверки страницы: получена контрольная сумма 54709, а ожидалась - 2236
+ОШИБКА:  неверная страница в блоке 0 отношения base/16384/16388
+```
+- были обнаружены ошибки контрольных сумм файла таблицы. Игнорировать ошибку поможет параметр [ignore_checksum_failure] установленный в значение true.
+- проверка
+```
+checkbase=# show ignore_checksum_failure;
+ ignore_checksum_failure
+-------------------------
+ off
+(1 строка)
+```
+- включаем
+```
+checkbase=# set ignore_checksum_failure = on;
+SET
+```
+ - повторная выборка
+```
+checkbase=# select * from simletable;
+ПРЕДУПРЕЖДЕНИЕ:  ошибка проверки страницы: получена контрольная сумма 54709, а ожидалась - 2236
+ id  | datavalue
+-----+-----------
+ 300 | три сотни
+   4 | четыре
+(2 строки)
+```
+
