@@ -1,8 +1,9 @@
-
+развернул кластер, 
+создал базу для тестов
 ```sql
 create database ot12;
 ```
-настройки от pgtune:
+прмиенил настройки от pgtune:
 ```sql
 ALTER SYSTEM SET  max_connections = '200';
 ALTER SYSTEM SET  shared_buffers = '512MB';
@@ -17,7 +18,7 @@ ALTER SYSTEM SET  work_mem = '1310kB';
 ALTER SYSTEM SET  min_wal_size = '1GB';
 ALTER SYSTEM SET  max_wal_size = '4GB';
 ```
-
+## тестирование pg_bench
 ```shell
 sudo -u postgres pgbench -c 50 -j 2 -P 10 -T 60 ot12
 ```
